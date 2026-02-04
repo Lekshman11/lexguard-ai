@@ -1,0 +1,8 @@
+flask
+python-dotenv
+pytesseract
+pdfplumber
+Pillow
+requests
+transformers
+torch

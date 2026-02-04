@@ -1,0 +1,90 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Poppins', sans-serif;
+}
+
+body {
+    background: radial-gradient(circle at top, #1b2735, #090a0f);
+    color: #ffffff;
+    min-height: 100vh;
+}
+
+.container {
+    width: 90%;
+    max-width: 1200px;
+    margin: auto;
+    padding: 40px 0;
+}
+
+/* Header */
+.header {
+    text-align: center;
+    margin-bottom: 50px;
+}
+
+.header h1 {
+    font-size: 3rem;
+    font-weight: 600;
+}
+
+.header p {
+    color: #b0c4de;
+    margin-top: 10px;
+}
+
+/* Grid */
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 30px;
+}
+
+/* Cards */
+.card {
+    background: linear-gradient(145deg, #141e30, #243b55);
+    border-radius: 20px;
+    padding: 30px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.35s ease;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.card:hover {
+    transform: translateY(-10px) scale(1.03);
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+}
+
+.card .icon {
+    font-size: 3rem;
+    margin-bottom: 15px;
+}
+
+.card h3 {
+    font-size: 1.3rem;
+    margin-bottom: 10px;
+}
+
+.card p {
+    font-size: 0.9rem;
+    color: #d1d9e6;
+}
+
+/* Special Alert Card */
+.card.alert {
+    background: linear-gradient(145deg, #3a0f0f, #8b0000);
+}
+
+.card.alert:hover {
+    box-shadow: 0 20px 40px rgba(255, 0, 0, 0.4);
+}
+
+/* Footer */
+.footer {
+    margin-top: 60px;
+    text-align: center;
+    font-size: 0.8rem;
+    color: #8899aa;
+}
