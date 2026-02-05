@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Document Scanner | LexGuard AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<button class="back-btn" onclick="window.location.href='/'">⬅ Back</button>
+
+<div class="container">
+    <h1>📄 Document Scanner</h1>
+    <p>Upload a legal document to detect risky clauses</p>
+
+    <input type="file" id="fileInput">
+    <button onclick="scanDocument()">Scan Document</button>
+
+    <!-- Loader -->
+    <div id="scanLoader" style="display:none;margin-top:20px;">
+        <div class="spinner"></div>
+        <p>Analyzing document...</p>
+    </div>
+
+    <!-- Heatmap -->
+    <div id="heatmap" class="heatmap" style="display:none;">
+        <div class="heat high">High Risk: <span id="highCount">0</span></div>
+        <div class="heat medium">Medium Risk: <span id="mediumCount">0</span></div>
+        <div class="heat low">Low Risk: <span id="lowCount">0</span></div>
+    </div>
+
+    <!-- Clauses -->
+    <div id="clauses"></div>
+</div>
+
+<script>
+async function scanDocument() {
+    const file = document.getElementById("fileInput").files[0];
+    if (!file) {
+        alert("Please upload a PDF");
+        return;
+    }
+
+    document.getElementById("scanLoader").style.display = "block";
+    document.getElementById("clauses").innerHTML = "";
+    document.getElementById("heatmap").style.display = "none";
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("/api/scan", {
+        method: "POST",
+        body: formData
+    });
+
+    const data = await res.json();
+    document.getElementById("scanLoader").style.display = "none";
+
+    // Heatmap
+    document.getElementById("highCount").innerText = data.heatmap.high;
+    document.getElementById("mediumCount").innerText = data.heatmap.medium;
+    document.getElementById("lowCount").innerText = data.heatmap.low;
+    document.getElementById("heatmap").style.display = "flex";
+
+    // Clauses
+    data.clauses.forEach(c => {
+        const div = document.createElement("div");
+        div.className = `clause ${c.risk.toLowerCase()}`;
+        div.innerHTML = `
+            <h3>Clause ${c.id} — ${c.risk} Risk</h3>
+            <p>${c.text}</p>
+            <p><b>Why risky?</b> ${c.explanation}</p>
+            <p><b>Suggestion:</b> ${c.alternate_solution}</p>
+        `;
+        document.getElementById("clauses").appendChild(div);
+    });
+}
+</script>
+
+</body>
+</html>
