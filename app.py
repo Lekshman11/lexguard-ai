@@ -28,14 +28,14 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # 🟢 TWILIO CONFIGURATION (Verified Credentials)
-TWILIO_SID = "AC84e896c393cfa3d25482e0d3a95d7c53"
-TWILIO_AUTH = "66a64bb1549f14d9ceb638daf7cc6e9d"
+TWILIO_SID = "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+TWILIO_AUTH = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # 🟢 FROM Number (Must match your curl command)
-TWILIO_PHONE = "+17622093495"
+TWILIO_PHONE = "+xxxxxxxxx"
 
 # 🟢 TO Number (Your Verified Indian Number)
-MY_PHONE = "+919176200584"
+MY_PHONE = "+XXXXXXXXXXXX"
 
 
 # =========================================================
