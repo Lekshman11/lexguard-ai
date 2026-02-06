@@ -8,40 +8,38 @@
 
 <button class="back-btn" onclick="window.location.href='/'">⬅ Back</button>
 
-<div class="container">
+<div class="scanner-wrapper">
+
     <h1>📄 Document Scanner</h1>
-    <p>Upload a legal document to detect risky clauses</p>
+    <p class="subtitle">Upload a legal document and instantly detect risky clauses</p>
 
-    <input type="file" id="fileInput">
-    <button onclick="scanDocument()">Scan Document</button>
+    <div class="upload-card">
+        <input type="file" id="fileInput">
+        <button class="scan-btn" onclick="scan()">Scan & Analyze</button>
+    </div>
 
-    <!-- Loader -->
-    <div id="scanLoader" style="display:none;margin-top:20px;">
+    <div id="loader" class="loader" style="display:none;">
         <div class="spinner"></div>
-        <p>Analyzing document...</p>
+        <p>Analyzing document…</p>
     </div>
 
-    <!-- Heatmap -->
     <div id="heatmap" class="heatmap" style="display:none;">
-        <div class="heat high">High Risk: <span id="highCount">0</span></div>
-        <div class="heat medium">Medium Risk: <span id="mediumCount">0</span></div>
-        <div class="heat low">Low Risk: <span id="lowCount">0</span></div>
+        <div class="heat high">🔴 High: <span id="high">0</span></div>
+        <div class="heat medium">🟡 Medium: <span id="medium">0</span></div>
+        <div class="heat low">🟢 Low: <span id="low">0</span></div>
     </div>
 
-    <!-- Clauses -->
-    <div id="clauses"></div>
+    <div id="results"></div>
+
 </div>
 
 <script>
-async function scanDocument() {
+async function scan() {
     const file = document.getElementById("fileInput").files[0];
-    if (!file) {
-        alert("Please upload a PDF");
-        return;
-    }
+    if (!file) return alert("Upload a PDF");
 
-    document.getElementById("scanLoader").style.display = "block";
-    document.getElementById("clauses").innerHTML = "";
+    document.getElementById("loader").style.display = "block";
+    document.getElementById("results").innerHTML = "";
     document.getElementById("heatmap").style.display = "none";
 
     const formData = new FormData();
@@ -53,25 +51,26 @@ async function scanDocument() {
     });
 
     const data = await res.json();
-    document.getElementById("scanLoader").style.display = "none";
+    document.getElementById("loader").style.display = "none";
 
-    // Heatmap
-    document.getElementById("highCount").innerText = data.heatmap.high;
-    document.getElementById("mediumCount").innerText = data.heatmap.medium;
-    document.getElementById("lowCount").innerText = data.heatmap.low;
+    document.getElementById("high").innerText = data.heatmap.high;
+    document.getElementById("medium").innerText = data.heatmap.medium;
+    document.getElementById("low").innerText = data.heatmap.low;
     document.getElementById("heatmap").style.display = "flex";
 
-    // Clauses
     data.clauses.forEach(c => {
-        const div = document.createElement("div");
-        div.className = `clause ${c.risk.toLowerCase()}`;
-        div.innerHTML = `
-            <h3>Clause ${c.id} — ${c.risk} Risk</h3>
-            <p>${c.text}</p>
-            <p><b>Why risky?</b> ${c.explanation}</p>
-            <p><b>Suggestion:</b> ${c.alternate_solution}</p>
+        const card = document.createElement("div");
+        card.className = `risk-card ${c.risk.toLowerCase()}`;
+        card.innerHTML = `
+            <h3>${c.risk_title}</h3>
+            <p class="impact">💥 ${c.impact}</p>
+            <p class="suggestion">💡 ${c.suggestion}</p>
+            <details>
+                <summary>View clause</summary>
+                <p>${c.full_text}</p>
+            </details>
         `;
-        document.getElementById("clauses").appendChild(div);
+        document.getElementById("results").appendChild(card);
     });
 }
 </script>
