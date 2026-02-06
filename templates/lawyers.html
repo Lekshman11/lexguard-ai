@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Legal Advisor | LexGuard AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div class="container">
+
+    <!-- Header -->
+    <header class="header">
+        <h1>⚖️ Legal Advisor</h1>
+        <p>Get general information about Indian laws and your legal rights</p>
+        <a href="/" class="back-link">← Back to Dashboard</a>
+    </header>
+
+    <!-- Question Input Section -->
+    <div class="legal-input-section">
+        <h2>💬 Ask Your Legal Question</h2>
+        <textarea 
+            id="questionInput" 
+            placeholder="e.g., What are my rights as a tenant? Can I file for divorce? What should I do if a cheque bounces?"
+            rows="4"
+        ></textarea>
+        <button id="askButton" class="primary-btn">📖 Explain My Rights</button>
+    </div>
+
+    <!-- Loading Indicator -->
+    <div id="loadingIndicator" class="loading-indicator" style="display: none;">
+        <div class="spinner"></div>
+        <p>Analyzing your question...</p>
+    </div>
+
+    <!-- Results Section -->
+    <div id="resultsSection" class="results-section" style="display: none;">
+        
+        <!-- Context Info -->
+        <div id="contextInfo" class="info-box"></div>
+
+        <!-- Main Legal Information -->
+        <div id="legalContent" class="legal-content">
+            <h2 id="legalTitle" class="legal-title"></h2>
+            
+            <div class="section">
+                <h3>Key Information:</h3>
+                <div id="keyPoints"></div>
+            </div>
+
+            <!-- Law References -->
+            <div class="section">
+                <h3>📖 Relevant Laws / Acts (for reference):</h3>
+                <div id="lawReferences" class="law-references"></div>
+            </div>
+
+            <!-- What Next -->
+            <div id="whatNextSection" class="section" style="display: none;">
+                <h3>🔍 What Can You Do Next?</h3>
+                <p class="subtitle">These are general options available, not recommendations:</p>
+                <ul id="whatNextList"></ul>
+            </div>
+
+            <!-- Disclaimer -->
+            <div id="disclaimer" class="disclaimer-box"></div>
+        </div>
+
+        <!-- No Match Message -->
+        <div id="noMatchContent" class="no-match-content" style="display: none;">
+            <div class="info-box">
+                <h3>ℹ️ Topic Not Covered Yet</h3>
+                <p id="noMatchMessage"></p>
+                <p><strong>Available Topics:</strong></p>
+                <p id="availableTopics" class="available-topics"></p>
+            </div>
+            <div class="disclaimer-box" id="noMatchDisclaimer"></div>
+        </div>
+    </div>
+
+</div>
+
+<script>
+    const questionInput = document.getElementById('questionInput');
+    const askButton = document.getElementById('askButton');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const resultsSection = document.getElementById('resultsSection');
+    const legalContent = document.getElementById('legalContent');
+    const noMatchContent = document.getElementById('noMatchContent');
+
+    askButton.addEventListener('click', async () => {
+        const question = questionInput.value.trim();
+        
+        if (!question) {
+            alert('⚠️ Please enter a question to get legal information.');
+            return;
+        }
+
+        // Show loading
+        loadingIndicator.style.display = 'block';
+        resultsSection.style.display = 'none';
+
+        try {
+            const response = await fetch('/api/legal', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ question: question })
+            });
+
+            const data = await response.json();
+            
+            // Hide loading
+            loadingIndicator.style.display = 'none';
+            resultsSection.style.display = 'block';
+
+            if (data.success && data.matched) {
+                // Show matched content
+                legalContent.style.display = 'block';
+                noMatchContent.style.display = 'none';
+
+                // Context info
+                document.getElementById('contextInfo').innerHTML = `
+                    <p>ℹ️ Based on your question, this generally relates to <strong>${data.title}</strong> under Indian law.</p>
+                    <p class="keyword-match">Matched using keywords related to: '${data.keyword}'</p>
+                `;
+
+                // Title
+                document.getElementById('legalTitle').textContent = `📚 ${data.title}`;
+
+                // Key points
+                document.getElementById('keyPoints').innerHTML = data.answer;
+
+                // Law references
+                const lawReferencesHtml = data.law_reference.map(law => `
+                    <details class="law-detail">
+                        <summary><strong>${law.name}</strong> — ${law.section}</summary>
+                        <div class="law-description">
+                            <p><strong>What this law says:</strong></p>
+                            <p>${law.description}</p>
+                        </div>
+                    </details>
+                `).join('');
+                document.getElementById('lawReferences').innerHTML = lawReferencesHtml;
+
+                // What next
+                if (data.what_next && data.what_next.length > 0) {
+                    document.getElementById('whatNextSection').style.display = 'block';
+                    const whatNextHtml = data.what_next.map(item => `<li>${item}</li>`).join('');
+                    document.getElementById('whatNextList').innerHTML = whatNextHtml;
+                } else {
+                    document.getElementById('whatNextSection').style.display = 'none';
+                }
+
+                // Disclaimer
+                document.getElementById('disclaimer').innerHTML = `<p>${data.disclaimer}</p>`;
+
+            } else if (data.success && !data.matched) {
+                // Show no match content
+                legalContent.style.display = 'none';
+                noMatchContent.style.display = 'block';
+
+                document.getElementById('noMatchMessage').textContent = data.message;
+                document.getElementById('availableTopics').textContent = data.available_topics;
+                document.getElementById('noMatchDisclaimer').innerHTML = `<p>${data.disclaimer}</p>`;
+
+            } else {
+                alert('Error: ' + (data.error || 'Unknown error occurred'));
+            }
+
+        } catch (error) {
+            loadingIndicator.style.display = 'none';
+            alert('Error: ' + error.message);
+        }
+    });
+
+    // Allow Enter key to submit (Shift+Enter for new line)
+    questionInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            askButton.click();
+        }
+    });
+</script>
+
+</body>
+</html>
