@@ -6,3 +6,8 @@ Pillow
 requests
 transformers
 torch
+googletrans==4.0.0-rc.1
+reportlab
+resend
+gunicorn
+werkzeug

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: lexguard-ai
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.10.12"
+      - key: RESEND_API_KEY
+        value: re_ak4V8RHc_6nGGpW3BQ48NwuMRLk9Sj4ZE
