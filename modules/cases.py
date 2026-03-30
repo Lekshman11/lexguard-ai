@@ -1,50 +1,38 @@
-import sqlite3
-import os
+from sqlalchemy import or_, select
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cases.db")
+from modules.database import cases_table, engine
+from seed_cases_db import ensure_cases_seeded
 
 def find_cases(query, year=None, court=None):
-    """
-    INPUT:
-        query (str)
-        year (str or None)
-        court (str or None)
-
-    OUTPUT:
-        {
-            "success": True/False,
-            "cases": [
-                {
-                    "title": str,
-                    "summary": str,
-                    "outcome": str
-                }
-            ]
-        }
-    """
-    if not os.path.exists(DB_PATH):
-        return {"success": False, "error": "Cases database not found. Please set up cases.db first.", "cases": []}
-
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
+        ensure_cases_seeded()
+        search_term = f"%{(query or '').strip()}%"
 
-        sql = """SELECT case_name, narrative, judgement 
-                 FROM cases 
-                 WHERE (case_name LIKE ? OR narrative LIKE ? OR key_people LIKE ? OR judgement LIKE ?)"""
-        params = [f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"]
+        statement = select(
+            cases_table.c.case_name,
+            cases_table.c.year,
+            cases_table.c.court,
+            cases_table.c.judges,
+            cases_table.c.narrative,
+            cases_table.c.judgement,
+            cases_table.c.key_people,
+        ).where(
+            or_(
+                cases_table.c.case_name.ilike(search_term),
+                cases_table.c.narrative.ilike(search_term),
+                cases_table.c.key_people.ilike(search_term),
+                cases_table.c.judgement.ilike(search_term),
+            )
+        )
 
         if year and year != "Any":
-            sql += " AND year = ?"
-            params.append(year)
+            statement = statement.where(cases_table.c.year == year)
 
         if court and court != "Any":
-            sql += " AND court = ?"
-            params.append(court)
+            statement = statement.where(cases_table.c.court == court)
 
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
+        with engine.connect() as conn:
+            rows = conn.execute(statement).all()
 
         if not rows:
             return {"success": True, "cases": []}
@@ -53,11 +41,15 @@ def find_cases(query, year=None, court=None):
         for row in rows:
             cases.append({
                 "title": row[0],
-                "summary": row[1],
-                "outcome": row[2]
+                "year": row[1],
+                "court": row[2],
+                "judges": row[3],
+                "summary": row[4],
+                "outcome": row[5],
+                "key_people": row[6],
             })
 
         return {"success": True, "cases": cases}
 
-    except Exception as e:
-        return {"success": False, "error": str(e), "cases": []}
+    except Exception as exc:
+        return {"success": False, "error": str(exc), "cases": []}

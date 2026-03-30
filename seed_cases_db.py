@@ -1,12 +1,10 @@
 """
-Seed script for cases.db
-Creates the SQLite database with 50 landmark Indian court cases.
-Run once: python seed_cases_db.py
+Seed the shared cases table with 50 landmark Indian court cases.
+Works with the local SQLite fallback or a hosted Postgres DATABASE_URL.
 """
-import sqlite3
-import os
+from sqlalchemy import delete, func, insert, select
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases.db")
+from modules.database import cases_table, engine, get_database_backend, init_database
 
 CASES = [
     (1, "Kesavananda Bharati vs. State of Kerala", "1973", "Supreme Court", "S.M. Sikri, A.N. Grover, B.C. Ray", "Basic Structure Doctrine Established", "The Supreme Court ruled that while Parliament has wide powers to amend the Constitution, it cannot alter its 'Basic Structure'.", "Kesavananda Bharati, Nani Palkhivala"),
@@ -62,36 +60,31 @@ CASES = [
 ]
 
 
-def seed():
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-        print(f"[x] Removed existing {DB_PATH}")
+def _case_rows():
+    columns = ("id", "case_name", "year", "court", "judges", "judgement", "narrative", "key_people")
+    return [dict(zip(columns, case_record)) for case_record in CASES]
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE cases (
-            id INTEGER PRIMARY KEY,
-            case_name TEXT NOT NULL,
-            year TEXT,
-            court TEXT,
-            judges TEXT,
-            judgement TEXT,
-            narrative TEXT,
-            key_people TEXT
-        )
-    """)
+def seed(reset=False):
+    init_database()
 
-    cursor.executemany(
-        "INSERT INTO cases (id, case_name, year, court, judges, judgement, narrative, key_people) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        CASES
-    )
+    with engine.begin() as conn:
+        if reset:
+            conn.execute(delete(cases_table))
+        conn.execute(insert(cases_table), _case_rows())
 
-    conn.commit()
-    conn.close()
-    print(f"[OK] Created {DB_PATH} with {len(CASES)} landmark cases")
+    print(f"[OK] Seeded {len(CASES)} landmark cases into {get_database_backend()}")
+
+
+def ensure_cases_seeded():
+    init_database()
+
+    with engine.connect() as conn:
+        total_cases = conn.execute(select(func.count()).select_from(cases_table)).scalar_one()
+
+    if total_cases == 0:
+        seed(reset=False)
 
 
 if __name__ == "__main__":
-    seed()
+    seed(reset=True)

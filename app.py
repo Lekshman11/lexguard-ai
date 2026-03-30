@@ -1,17 +1,35 @@
 import os
 import io
 import re as re_module
+from pathlib import Path
 import requests  # 🔴 REQUIRED: Run 'pip install requests'
-import sqlite3
 import resend
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
+from dotenv import load_dotenv
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, send_from_directory
 from datetime import datetime
-from googletrans import Translator
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
+from sqlalchemy import insert
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash
+
+try:
+    from googletrans import Translator
+except Exception as e:
+    print(f"[WARNING] googletrans could not be imported: {e}")
+
+    class _FallbackTranslation:
+        def __init__(self, text):
+            self.text = text
+
+    class Translator:  # type: ignore[override]
+        def translate(self, text, dest="en"):
+            return _FallbackTranslation(text)
+
+load_dotenv()
 
 # --- IMPORT YOUR MODULES ---
 # Ensure these files exist in your 'modules' folder.
@@ -32,20 +50,82 @@ except ImportError as e:
     def protect_me(k): return {"response": "Module missing"}
 
 app = Flask(__name__)
-app.secret_key = "lexguard_super_secret_key_2024"
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-key-change-me")
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0") == "1"
+app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
 
 # --- AUTH & REVIEWS MODULES ---
 try:
-    from modules.auth import init_auth_db, register_user, login_user, role_required, login_required
+    from modules.auth import (
+        email_in_use_by_other_user,
+        get_user_by_id,
+        init_auth_db,
+        login_required,
+        login_user,
+        register_user,
+        role_required,
+        update_user_profile,
+    )
     from modules.reviews import init_reviews_db, submit_for_review, get_pending_reviews, get_approved_reviews, get_user_reviews, approve_review
     init_auth_db()
     init_reviews_db()
 except ImportError as e:
     print(f"[WARNING] Auth/Reviews modules could not be imported: {e}")
 
-# --- CONFIGURATION ---
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+from modules.database import case_requests_table, engine, get_database_backend, init_database
+from modules.storage import UPLOAD_DIR, get_storage_backend, save_uploaded_file
+from seed_cases_db import ensure_cases_seeded
+
+init_database()
+ensure_cases_seeded()
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
+FRONTEND_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
+
+
+def frontend_dist_ready():
+    return (FRONTEND_DIST_DIR / "index.html").exists()
+
+
+def serve_frontend_app():
+    return send_from_directory(FRONTEND_DIST_DIR, "index.html")
+
+
+def render_ui_or_spa(template_name, **context):
+    if frontend_dist_ready():
+        return serve_frontend_app()
+    return render_template(template_name, **context)
+
+
+def serialize_user(user):
+    if not user:
+        return None
+
+    return {
+        "id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+        "role": user["role"],
+    }
+
+
+def get_current_session_payload():
+    user = None
+    user_id = session.get("user_id")
+
+    if user_id:
+        try:
+            user = serialize_user(get_user_by_id(user_id))
+        except Exception:
+            user = None
+
+    return {
+        "authenticated": bool(user),
+        "lang": session.get("lang", "en"),
+        "user": user,
+    }
 
 # --- DEMO CASE STATUS ENGINE ---
 # This is a demo dataset. In production, integrate with authorized judicial APIs.
@@ -55,29 +135,8 @@ DEMO_CASES = {
     "9999": {"status": "Adjourned", "next_hearing": "01-Sep-2026"}
 }
 
-# --- CASE REQUESTS DB ---
-CASE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lexguard_auth.db")
-
-def init_case_requests_db():
-    """Create case_requests table if it doesn't exist. Does NOT alter other tables."""
-    conn = sqlite3.connect(CASE_DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS case_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            case_number TEXT,
-            year TEXT,
-            court_type TEXT,
-            status TEXT,
-            next_hearing TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.commit()
-    conn.close()
-    print("[CASE-LOOKUP] case_requests table initialized")
-
-init_case_requests_db()
+print(f"[CASE-LOOKUP] Database ready ({get_database_backend()})")
+print(f"[STORAGE] Upload directory ready at {UPLOAD_DIR}")
 
 # --- EMAIL NOTIFICATION (Resend SDK) ---
 # ============================================================
@@ -87,47 +146,82 @@ init_case_requests_db()
 #   Linux/Mac:  export RESEND_API_KEY=re_xxxxxxxxxxxx
 # GLOBAL key — one key for all users. Do NOT generate per user.
 # ============================================================
-resend.api_key = os.getenv("RESEND_API_KEY", "re_ak4V8RHc_6nGGpW3BQ48NwuMRLk9Sj4ZE")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+resend.api_key = RESEND_API_KEY
 
 SENDER_EMAIL = "LexGuard AI <onboarding@resend.dev>"
 
 def send_case_email(to_email, case_number, status, next_hearing):
-    """Send case status email via Resend SDK. Uses global API key."""
-    if not resend.api_key:
+    """Send case status email via Resend SDK. Retries up to 3 times for rate limits."""
+    import time
+
+    if not RESEND_API_KEY:
         print("[EMAIL] Resend API key not configured")
         return False
 
     print(f"[EMAIL] Attempting to send email to: {to_email}")
-    try:
-        response = resend.Emails.send({
-            "from": SENDER_EMAIL,
-            "to": [to_email],
-            "subject": "LexGuard Case Status Update",
-            "html": f"""
-                <h2>⚖️ Case Status Update</h2>
-                <p><strong>Case Number:</strong> {case_number}</p>
-                <p><strong>Status:</strong> {status}</p>
-                <p><strong>Next Hearing:</strong> {next_hearing or 'Not Scheduled'}</p>
-                <br>
-                <p style="color: #666;">- LexGuard AI</p>
-            """
-        })
-        print(f"[EMAIL] ✅ Sent successfully to {to_email} — ID: {response}")
-        return True
-    except Exception as e:
-        print(f"[EMAIL] ❌ Failed to send to {to_email}: {e}")
-        return False
 
-# 🟢 TWILIO CONFIGURATION (Verified Credentials)
-TWILIO_SID = "AC84e896c393cfa3d25482e0d3a95d7c53"
-TWILIO_AUTH = "97c21844db8ec9444003523562d4a9c5"
+    email_payload = {
+        "from": SENDER_EMAIL,
+        "to": [to_email],
+        "subject": "LexGuard Case Status Update",
+        "html": f"""
+            <h2>⚖️ Case Status Update</h2>
+            <p><strong>Case Number:</strong> {case_number}</p>
+            <p><strong>Status:</strong> {status}</p>
+            <p><strong>Next Hearing:</strong> {next_hearing or 'Not Scheduled'}</p>
+            <br>
+            <p style="color: #666;">- LexGuard AI</p>
+        """
+    }
 
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Re-set API key on each attempt (guards against SDK state issues)
+            resend.api_key = RESEND_API_KEY
+            response = resend.Emails.send(email_payload)
 
-# 🟢 FROM Number (Must match your curl command)
-TWILIO_PHONE = "+17622093495"
+            # Extract email ID from response
+            email_id = None
+            if isinstance(response, dict):
+                if response.get("statusCode") or response.get("error"):
+                    err_msg = response.get("message") or response.get("error") or str(response)
+                    print(f"[EMAIL] Attempt {attempt}/{max_retries} — API error: {err_msg}")
+                    if attempt < max_retries:
+                        time.sleep(attempt * 2)  # backoff: 2s, 4s
+                        continue
+                    return False
+                email_id = response.get("id")
+            elif hasattr(response, "id"):
+                email_id = response.id
 
-# 🟢 TO Number (Your Verified Indian Number)
-MY_PHONE = "+919176200584"
+            if email_id:
+                print(f"[EMAIL] ✅ Sent to {to_email} — ID: {email_id}")
+                return True
+            else:
+                print(f"[EMAIL] Attempt {attempt}/{max_retries} — no ID in response: {response}")
+                if attempt < max_retries:
+                    time.sleep(attempt * 2)
+                    continue
+                return False
+
+        except Exception as e:
+            err_str = str(e).lower()
+            print(f"[EMAIL] Attempt {attempt}/{max_retries} — exception: {e}")
+            # Retry on rate limit or transient errors
+            if attempt < max_retries and ("rate" in err_str or "429" in err_str or "timeout" in err_str or "connection" in err_str):
+                time.sleep(attempt * 2)
+                continue
+            return False
+
+    return False
+
+# 🟢 TWILIO CONFIGURATION
+TWILIO_SID = os.getenv("TWILIO_SID", "")
+TWILIO_AUTH = os.getenv("TWILIO_AUTH", "")
+TWILIO_PHONE = os.getenv("TWILIO_PHONE", "")
+MY_PHONE = os.getenv("MY_PHONE", "")
 
 
 # =========================================================
@@ -136,53 +230,67 @@ MY_PHONE = "+919176200584"
 
 @app.route("/")
 def home():
-    return render_template("dashboard.html")
+    return render_ui_or_spa("dashboard.html")
 
 @app.route("/dashboard")
 def dashboard():
-    if not session.get("user_id"):
-        return redirect(url_for("login_page"))
-    return render_template("dashboard.html")
+    return render_ui_or_spa("dashboard.html")
 
 @app.route("/scanner")
 def scanner_page():
-    return render_template("scanner.html")
+    return render_ui_or_spa("scanner.html")
 
 @app.route("/legal-advisor")
 def legal_advisor_page():
-    return render_template("legal_advisor.html")
+    return render_ui_or_spa("legal_advisor.html")
 
 @app.route("/cases")
 def cases_page():
-    return render_template("cases.html")
+    return render_ui_or_spa("cases.html")
 
 @app.route("/lawyers")
 def lawyers_page():
-    return render_template("lawyers.html")
+    return render_ui_or_spa("lawyers.html")
 
 @app.route("/protect")
 def protect_page():
-    return render_template("protect.html")
+    return render_ui_or_spa("protect.html")
+
+@app.route("/case-lookup")
+def case_lookup_page():
+    if frontend_dist_ready():
+        return serve_frontend_app()
+    return send_from_directory(app.static_folder, "case_lookup.html")
+
+@app.route("/assets/<path:filename>")
+def frontend_assets(filename):
+    if FRONTEND_ASSETS_DIR.exists():
+        return send_from_directory(FRONTEND_ASSETS_DIR, filename)
+    return jsonify({"success": False, "error": "Frontend assets not built."}), 404
 
 
 # =========================================================
 #  2. CORE API ROUTES (FUNCTIONALITY)
 # =========================================================
 
+@app.route("/api/session")
+def api_session():
+    return jsonify(get_current_session_payload())
+
 @app.route("/api/scan", methods=["POST"])
 def api_scan():
     if "file" not in request.files:
         return jsonify({"success": False, "error": "No file uploaded"})
-    
+
     file = request.files["file"]
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(file_path)
+    file_path, stored_name = save_uploaded_file(file, prefix="scan")
 
     try:
-        result = scan_and_analyze(file_path)
+        result = scan_and_analyze(str(file_path))
+        result["stored_file"] = stored_name
         return jsonify(result)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+    except Exception as exc:
+        return jsonify({"success": False, "error": str(exc)})
 
 @app.route("/api/legal", methods=["POST"])
 def api_legal():
@@ -226,12 +334,9 @@ def api_protect():
 def save_audio():
     if "audio" not in request.files:
         return jsonify({"status": "error", "message": "No audio file"})
-        
+
     audio = request.files["audio"]
-    # Save with specific timestamp for evidence
-    filename = datetime.now().strftime("Evidence_%Y%m%d%H%M%S") + ".webm"
-    path = os.path.join(UPLOAD_FOLDER, filename)
-    audio.save(path)
+    _, filename = save_uploaded_file(audio, prefix="evidence")
     return jsonify({"status": "saved", "filename": filename})
 
 
@@ -254,6 +359,12 @@ def send_sos():
     maps_url = f"https://maps.google.com/?q={lat},{lng}"
     
     message_body = f"LEXGUARD EMERGENCY!\nI feel unsafe.\nTracking Location: {maps_url}"
+
+    if not all([TWILIO_SID, TWILIO_AUTH, TWILIO_PHONE, MY_PHONE]):
+        return jsonify({
+            "status": "error",
+            "message": "Twilio is not configured. Set TWILIO_SID, TWILIO_AUTH, TWILIO_PHONE, and MY_PHONE."
+        }), 500
 
     # 3. Construct the API URL
     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
@@ -294,6 +405,9 @@ def send_sos():
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
+    if request.method == "GET":
+        return render_ui_or_spa("login.html")
+
     if request.method == "POST":
         result = login_user(request.form.get("email"), request.form.get("password"))
         if result["success"]:
@@ -305,10 +419,12 @@ def login_page():
                 return redirect(url_for("lawyer_dashboard"))
             return redirect(url_for("user_dashboard"))
         return render_template("login.html", error=result["message"])
-    return render_template("login.html")
 
 @app.route("/register", methods=["GET", "POST"])
 def register_page():
+    if request.method == "GET":
+        return render_ui_or_spa("register.html")
+
     if request.method == "POST":
         result = register_user(
             request.form.get("name"),
@@ -319,12 +435,46 @@ def register_page():
         if result["success"]:
             return render_template("register.html", success="Account created! You can now login.")
         return render_template("register.html", error=result["message"])
-    return render_template("register.html")
 
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("home"))
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    data = request.get_json() or {}
+    result = login_user(data.get("email"), data.get("password"))
+
+    if not result["success"]:
+        return jsonify({"success": False, "error": result["message"]}), 401
+
+    user = result["user"]
+    session["user_id"] = user["id"]
+    session["role"] = user["role"]
+    session["name"] = user["name"]
+    return jsonify({"success": True, "user": serialize_user(user)})
+
+@app.route("/api/register", methods=["POST"])
+def api_register():
+    data = request.get_json() or {}
+    result = register_user(
+        data.get("name"),
+        data.get("email"),
+        data.get("password"),
+        data.get("role", "user"),
+    )
+
+    status_code = 200 if result["success"] else 400
+    payload = {"success": result["success"], "message": result["message"]}
+    if not result["success"]:
+        payload["error"] = result["message"]
+    return jsonify(payload), status_code
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    session.clear()
+    return jsonify({"success": True})
 
 
 # =========================================================
@@ -332,17 +482,43 @@ def logout():
 # =========================================================
 
 @app.route("/lawyer-dashboard")
-@role_required("lawyer")
 def lawyer_dashboard():
+    if frontend_dist_ready():
+        return serve_frontend_app()
+    if not session.get("user_id"):
+        return redirect(url_for("login_page"))
+    if session.get("role") != "lawyer":
+        return jsonify({"success": False, "error": "Access denied. Requires role: lawyer"}), 403
     pending = get_pending_reviews()
     approved = get_approved_reviews()
     return render_template("lawyer_dashboard.html", pending=pending, approved=approved)
 
 @app.route("/user-dashboard")
-@role_required("user")
 def user_dashboard():
+    if frontend_dist_ready():
+        return serve_frontend_app()
+    if not session.get("user_id"):
+        return redirect(url_for("login_page"))
+    if session.get("role") != "user":
+        return jsonify({"success": False, "error": "Access denied. Requires role: user"}), 403
     reviews = get_user_reviews(session["user_id"])
     return render_template("user_dashboard.html", reviews=reviews)
+
+@app.route("/api/user-reviews")
+@login_required
+def api_user_reviews():
+    return jsonify({"success": True, "reviews": get_user_reviews(session["user_id"])})
+
+@app.route("/api/review-queue")
+@role_required("lawyer")
+def api_review_queue():
+    return jsonify(
+        {
+            "success": True,
+            "pending": get_pending_reviews(),
+            "approved": get_approved_reviews(),
+        }
+    )
 
 
 # =========================================================
@@ -353,25 +529,56 @@ def user_dashboard():
 @login_required
 def review_advice():
     """User submits a question. AI generates response, stored for lawyer review."""
-    question = (request.form.get("question") or "").strip()
+    if request.is_json:
+        data = request.get_json() or {}
+        question = (data.get("question") or "").strip()
+    else:
+        question = (request.form.get("question") or "").strip()
+
     if not question:
+        if request.is_json:
+            return jsonify({"success": False, "error": "Question is required."}), 400
         return redirect(url_for("user_dashboard"))
     # Get AI response (reuses existing legal_advice function)
     ai_result = legal_advice(question)
     ai_response = ai_result.get("answer", "No AI response generated.")
     # Store for lawyer review
     result = submit_for_review(session["user_id"], question, ai_response)
+    if request.is_json:
+        status_code = 200 if result.get("success") else 400
+        payload = {"success": result.get("success", False), "message": result.get("message", "")}
+        if result.get("review_id"):
+            payload["review_id"] = result["review_id"]
+        if not result.get("success"):
+            payload["error"] = result.get("message", "Review submission failed.")
+        return jsonify(payload), status_code
     return redirect(url_for("user_dashboard"))
 
 @app.route("/api/approve-advice", methods=["POST"])
 @role_required("lawyer")
 def approve_advice():
     """Lawyer approves or edits AI-generated advice."""
-    review_id = request.form.get("review_id")
-    final_response = request.form.get("final_response", "")
-    lawyer_notes = request.form.get("lawyer_notes", "")
+    if request.is_json:
+        data = request.get_json() or {}
+        review_id = data.get("review_id")
+        final_response = data.get("final_response", "")
+        lawyer_notes = data.get("lawyer_notes", "")
+    else:
+        review_id = request.form.get("review_id")
+        final_response = request.form.get("final_response", "")
+        lawyer_notes = request.form.get("lawyer_notes", "")
     if review_id:
-        approve_review(int(review_id), final_response, lawyer_notes)
+        result = approve_review(int(review_id), final_response, lawyer_notes)
+        if request.is_json:
+            status_code = 200 if result.get("success") else 400
+            payload = {"success": result.get("success", False), "message": result.get("message", "")}
+            if not result.get("success"):
+                payload["error"] = result.get("message", "Approval failed.")
+            return jsonify(payload), status_code
+    elif request.is_json:
+        return jsonify({"success": False, "error": "Review ID is required."}), 400
+    if request.is_json:
+        return jsonify({"success": True, "message": "Review approved successfully."})
     return redirect(url_for("lawyer_dashboard"))
 
 
@@ -410,27 +617,28 @@ def submit_case():
 
     # Save to database
     try:
-        conn = sqlite3.connect(CASE_DB_PATH)
-        conn.execute(
-            "INSERT INTO case_requests (user_id, case_number, year, court_type, status, next_hearing) VALUES (?, ?, ?, ?, ?, ?)",
-            (session["user_id"], case_number, year, court_type, status, next_hearing)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[CASE-LOOKUP ERROR] DB save failed: {e}")
+        with engine.begin() as conn:
+            conn.execute(
+                insert(case_requests_table).values(
+                    user_id=session["user_id"],
+                    case_number=case_number,
+                    year=year,
+                    court_type=court_type,
+                    status=status,
+                    next_hearing=next_hearing,
+                )
+            )
+    except Exception as exc:
+        print(f"[CASE-LOOKUP ERROR] DB save failed: {exc}")
 
     # Send email notification to logged-in user
     email_sent = False
     try:
-        from modules.auth import get_db
-        conn = get_db()
-        user = conn.execute("SELECT email FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-        conn.close()
+        user = get_user_by_id(session["user_id"])
         if user:
             email_sent = send_case_email(user["email"], case_number, status, next_hearing)
-    except Exception as e:
-        print(f"[CASE-LOOKUP ERROR] Email lookup failed: {e}")
+    except Exception as exc:
+        print(f"[CASE-LOOKUP ERROR] Email lookup failed: {exc}")
 
     return jsonify({
         "success": True,
@@ -451,18 +659,15 @@ def settings():
     - GET: show current user details
     - POST: update username, email, and optionally password
     """
+    if request.method == "GET" and frontend_dist_ready():
+        return serve_frontend_app()
+
     # Require login
     if not session.get("user_id"):
         return redirect(url_for("login_page"))
 
-    from modules.auth import get_db
-    from werkzeug.security import generate_password_hash
-
     if request.method == "GET":
-        # Fetch current user details (never expose password_hash)
-        conn = get_db()
-        user = conn.execute("SELECT id, name, email, role FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-        conn.close()
+        user = get_user_by_id(session["user_id"])
         if not user:
             return redirect(url_for("login_page"))
         return render_template("settings.html", user=user)
@@ -481,52 +686,64 @@ def settings():
     if new_password and new_password != confirm_password:
         return _render_settings_with_error("Passwords do not match.")
 
-    conn = get_db()
-
     # Email uniqueness check (exclude current user)
-    existing = conn.execute(
-        "SELECT id FROM users WHERE email = ? AND id != ?", (email, session["user_id"])
-    ).fetchone()
-    if existing:
-        conn.close()
+    if email_in_use_by_other_user(email, session["user_id"]):
         return _render_settings_with_error("This email is already in use by another account.")
 
     # Update user details
     try:
-        if new_password:
-            conn.execute(
-                "UPDATE users SET name = ?, email = ?, password_hash = ? WHERE id = ?",
-                (name, email, generate_password_hash(new_password), session["user_id"])
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET name = ?, email = ? WHERE id = ?",
-                (name, email, session["user_id"])
-            )
-        conn.commit()
-        conn.close()
+        password_hash = generate_password_hash(new_password) if new_password else None
+        user = update_user_profile(session["user_id"], name, email, password_hash=password_hash)
 
         # Update session if username changed
         session["name"] = name
 
-        # Re-fetch user for display
-        conn = get_db()
-        user = conn.execute("SELECT id, name, email, role FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-        conn.close()
         return render_template("settings.html", user=user, success="Profile updated successfully!")
 
-    except Exception as e:
-        conn.close()
-        return _render_settings_with_error(f"Update failed: {str(e)}")
+    except Exception as exc:
+        return _render_settings_with_error(f"Update failed: {str(exc)}")
 
 
 def _render_settings_with_error(error_msg):
     """Helper to re-render settings page with error and current user data."""
-    from modules.auth import get_db
-    conn = get_db()
-    user = conn.execute("SELECT id, name, email, role FROM users WHERE id = ?", (session["user_id"],)).fetchone()
-    conn.close()
+    user = get_user_by_id(session["user_id"])
     return render_template("settings.html", user=user, error=error_msg)
+
+@app.route("/api/settings", methods=["GET", "PUT"])
+@login_required
+def api_settings():
+    if request.method == "GET":
+        user = get_user_by_id(session["user_id"])
+        return jsonify({"success": True, "user": serialize_user(user)})
+
+    data = request.get_json() or {}
+    name = (data.get("name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    new_password = (data.get("new_password") or "").strip()
+    confirm_password = (data.get("confirm_password") or "").strip()
+
+    if not name or not email:
+        return jsonify({"success": False, "error": "Username and email are required."}), 400
+
+    if new_password and new_password != confirm_password:
+        return jsonify({"success": False, "error": "Passwords do not match."}), 400
+
+    if email_in_use_by_other_user(email, session["user_id"]):
+        return jsonify({"success": False, "error": "This email is already in use by another account."}), 400
+
+    try:
+        password_hash = generate_password_hash(new_password) if new_password else None
+        user = update_user_profile(session["user_id"], name, email, password_hash=password_hash)
+        session["name"] = name
+        return jsonify(
+            {
+                "success": True,
+                "message": "Profile updated successfully!",
+                "user": serialize_user(user),
+            }
+        )
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"Update failed: {str(exc)}"}), 500
 
 
 # =========================================================
@@ -675,6 +892,19 @@ def export_pdf():
                      mimetype='application/pdf')
 
 
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "status": "ok",
+            "database": get_database_backend(),
+            "storage": get_storage_backend(),
+        }
+    )
+
+
 if __name__ == "__main__":
-    print("LexGuard AI is running on http://127.0.0.1:5000")
-    app.run(debug=True)
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5000")))
+    print(f"LexGuard AI is running on http://{host}:{port}")
+    app.run(host=host, port=port, debug=os.getenv("FLASK_DEBUG", "0") == "1")

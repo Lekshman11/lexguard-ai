@@ -7,5 +7,25 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.10.12"
+      - key: FLASK_SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: LEXGUARD_DATA_DIR
+        value: /var/data
+      - key: LEXGUARD_UPLOAD_DIR
+        value: /var/data/uploads
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: SESSION_COOKIE_SAMESITE
+        value: Lax
       - key: RESEND_API_KEY
-        value: re_ak4V8RHc_6nGGpW3BQ48NwuMRLk9Sj4ZE
+        sync: false
+      - key: TWILIO_SID
+        sync: false
+      - key: TWILIO_AUTH
+        sync: false
+      - key: TWILIO_PHONE
+        sync: false
+      - key: MY_PHONE
+        sync: false

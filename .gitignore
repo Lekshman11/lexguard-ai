@@ -3,6 +3,11 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.venv/
+.vendor/
+.pytest_cache/
+frontend/node_modules/
+frontend/dist/
 
 # Android build artifacts
 android/.gradle/
@@ -16,6 +21,9 @@ android/.idea/
 
 # Uploads
 uploads/
+
+# Logs
+*.log
 
 # OS
 .DS_Store
